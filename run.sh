@@ -4,8 +4,8 @@
 # Removing previously created data (from last run.sh execution)
 rm -rf exp mfcc data/train/spk2utt data/train/cmvn.scp data/train/feats.scp data/train/split1 data/test/spk2utt data/test/cmvn.scp data/test/feats.scp data/test/split1 data/local/lang data/lang data/local/tmp data/local/dict/lexiconp.txt
 
-nj=1  # split training into how many jobs?
-nDecodeJobs=1
+nj=4  # split training into how many jobs?
+
 
 echo
 echo "===== PREPARING ACOUSTIC DATA ====="
@@ -20,8 +20,31 @@ echo
 
 # Making spk2utt files
 utils/utt2spk_to_spk2utt.pl data/train/utt2spk > data/train/spk2utt
-#utils/utt2spk_to_spk2utt.pl data/test/utt2spk > data/test/spk2utt
+utils/utt2spk_to_spk2utt.pl data/test/utt2spk > data/test/spk2utt
 
+echo
+echo "===== FEATURES EXTRACTION ====="
+echo
+
+#Calculating mfcc features
+echo "Computing features"
+
+utils/validate_data_dir.sh data/train     # script for checking prepared data - here: for data/train directory
+utils/fix_data_dir.sh data/train          # tool for data proper sorting if needed - here: for data/train directory
+
+
+utils/validate_data_dir.sh data/test     # script for checking prepared data - here: for data/test directory
+utils/fix_data_dir.sh data/test          # tool for data proper sorting if needed - here: for data/test directory
+
+mfccdir=mfcc
+steps/make_mfcc.sh --nj $nj --cmd "$train_cmd" data/train exp/make_mfcc/train $mfccdir
+steps/make_mfcc.sh --nj $nj --cmd "$train_cmd" data/test exp/make_mfcc/test $mfccdir
+
+# Making cmvn.scp files
+steps/compute_cmvn_stats.sh data/train exp/make_mfcc/train $mfccdir
+steps/compute_cmvn_stats.sh data/test exp/make_mfcc/test $mfccdir
+
+echo "finished till here"
 
 
 echo
@@ -36,28 +59,6 @@ echo
 
 # Preparing language data
 utils/prepare_lang.sh data/local/dict "<UNK>" data/local/lang data/lang
-
-exit
-
-echo
-echo "===== FEATURES EXTRACTION ====="
-echo
-
-#Calculating mfcc features
-echo "Computing features"
-
-utils/validate_data_dir.sh data/train     # script for checking prepared data - here: for data/train directory
-utils/fix_data_dir.sh data/train          # tool for data proper sorting if needed - here: for data/train directory
-
-mfccdir=mfcc
-steps/make_mfcc.sh --nj $nj --cmd "$train_cmd" data/train exp/make_mfcc/train $mfccdir
-#steps/make_mfcc.sh --nj $nj --cmd "$train_cmd" data/test exp/make_mfcc/test $mfccdir
-# Making cmvn.scp files
-steps/compute_cmvn_stats.sh data/train exp/make_mfcc/train $mfccdir
-#steps/compute_cmvn_stats.sh data/test exp/make_mfcc/test $mfccdir
-
-echo "finished till here"
-
 
 echo
 echo "===== LANGUAGE MODEL CREATION ====="
@@ -87,6 +88,7 @@ echo "===== MAKING G.fst ====="
 echo
 lang=data/lang
 arpa2fst --disambig-symbol=#0 --read-symbol-table=$lang/words.txt $local/tmp/lm.arpa $lang/G.fst
+
 echo
 echo "===== MONO TRAINING ====="
 echo
@@ -103,96 +105,51 @@ steps/align_si.sh --nj $nj --cmd "$train_cmd" data/train data/lang exp/mono exp/
 echo
 echo "===== TRI1 (first triphone pass) TRAINING ====="
 echo
-steps/train_deltas.sh --cmd "$train_cmd" 2000 11000 data/train data/lang exp/mono_ali exp/tri1 || exit 1
+steps/train_deltas.sh --cmd "$train_cmd" 250 20000 data/train data/lang exp/mono_ali exp/tri1 || exit 1
 echo
 echo "===== TRI1 (first triphone pass) DECODING ====="
 echo
 utils/mkgraph.sh data/lang exp/tri1 exp/tri1/graph || exit 1
 steps/decode.sh --config conf/decode.config --nj $nj --cmd "$decode_cmd" exp/tri1/graph data/test exp/tri1/decode
 echo
+echo "===== TRI1 (first triphone pass) ALIGNMENT ====="
+echo
+steps/align_si.sh --nj $nj --cmd "$train_cmd" data/train data/lang exp/tri1 exp/tri1_ali || exit 1
+
+
+echo
+echo "===== TRI2 (Second triphone pass - [a larger model than TRI1]) TRAINING ====="
+echo
+steps/train_deltas.sh --cmd "$train_cmd" 300 30000 data/train data/lang exp/tri1_ali exp/tri2 || exit 1
+echo
+echo "===== TRI2 (Second triphone pass) DECODING ====="
+echo
+utils/mkgraph.sh data/lang exp/tri2 exp/tri2/graph || exit 1
+steps/decode.sh --nj $nj --cmd "$decode_cmd" --config conf/decode.config exp/tri2/graph data/test exp/tri2/decode
+echo
+echo "===== TRI2 (Second triphone pass) ALIGNMENT ====="
+echo
+steps/align_si.sh --nj $nj --cmd "$train_cmd" data/train data/lang exp/tri2 exp/tri2_ali || exit 1
+echo
+echo "===== TRI3 (Third triphone pass -  [LDA+MLLT]) TRAINING ====="
+echo
+steps/train_lda_mllt.sh --cmd "$train_cmd" 250 30000 data/train data/lang exp/tri1_ali exp/tri3 || exit 1
+echo
+echo "===== TRI3 (Third triphone pass) DECODING ====="
+echo
+utils/mkgraph.sh data/lang exp/tri3 exp/tri3/graph || exit 1
+steps/decode.sh --nj $nj --cmd "$decode_cmd" --config conf/decode.config exp/tri3/graph data/test exp/tri3/decode
+echo
+echo "===== TRI3 (Third triphone pass) ALIGNMENT ====="
+echo
+steps/align_si.sh --nj $nj --cmd "$train_cmd" data/train data/lang exp/tri3 exp/tri3_ali || exit 1
+
+echo
 echo "===== run.sh script is finished ====="
 echo
 
 
 exit
-
-
-
-
-
-
-
-
-echo
-echo "===== LANGUAGE MODEL CREATION ====="
-echo
-
-#Monophone training
-    #Taking subset of data for monophone training for efficiency
-    #utils/subset_data_dir.sh --first data/train 10000 data/train_10k
-steps/train_mono.sh --nj $nj --cmd "$train_cmd" \ 
-data/train data/lang exp/mono 
-
-#Monophone alignment
-steps/align_si.sh --nj $nj --cmd "$train_cmd" \
-data/train data/lang exp/mono exp/mono_ali || exit 1
-
-echo "Begin : First triphone pass"
-
-#tri1 [First triphone pass] 2500 allophones(HMM states) and 30000 Gaussians
-steps/train_deltas.sh --cmd "$train_cmd" \
- 2500 30000 data/train data/lang exp/mono_ali exp/tri1 
-
-#tri1 decoding
-utils/mkgraph.sh data/lang_test exp/tri1 exp/tri1/graph
-
-steps/decode.sh --nj $nDecodeJobs --cmd "$decode_cmd" --config conf/decode.config \
- exp/tri1/graph data/train exp/tri1/decode
-
-#tri1 alignment
-steps/align_si.sh --nj $nj --cmd "$train_cmd" \
-  data/train data/lang exp/tri1 exp/tri1_ali 
-
-echo "Finish : First triphone pass"
-
-echo "Begin : Second triphone pass"
-
-#tri2 [a larger model than tri1]
-steps/train_deltas.sh --cmd "$train_cmd" \
-  3000 40000 data/train data/lang exp/tri1_ali exp/tri2
-
-#tri2 decoding
-utils/mkgraph.sh data/lang_test exp/tri2 exp/tri2/graph
-
-steps/decode.sh --nj $nDecodeJobs --cmd "$decode_cmd" --config conf/decode.config \
- exp/tri2/graph data/train exp/tri2/decode
-
-#tri2 alignment
-steps/align_si.sh --nj $nj --cmd "$train_cmd" \
-  data/train data/lang exp/tri2 exp/tri2_ali
-
-echo "Finish : Second triphone pass"
-
-echo "Begin : Third triphone pass"
-
-# tri3 training [LDA+MLLT]
-steps/train_lda_mllt.sh --cmd "$train_cmd" \
-  4000 50000 data/train data/lang exp/tri1_ali exp/tri3
-
-#tri3 decoding
-utils/mkgraph.sh data/lang_test exp/tri3 exp/tri3/graph
-
-exit
-steps/decode.sh --nj $nDecodeJobs --cmd "$decode_cmd" --config conf/decode.config \
-exp/tri3/graph data/train exp/tri3/decode
-
-#tri3 alignment
-steps/align_si.sh --nj $nj --cmd "$train_cmd"  data/train data/lang exp/tri3 exp/tri3_ali
-
-echo "Finish : Third triphone pass"
-
-
-
 
 
 
